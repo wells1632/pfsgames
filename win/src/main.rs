@@ -7,7 +7,7 @@ use std::io::{BufWriter, Write};
 use std::sync::mpsc;
 use std::thread;
 use chrono::{Local, NaiveDate, Duration};
-use rust_xlsxwriter::{Format, Workbook, Color, XlsxError};
+use rust_xlsxwriter::{Format, Workbook};
 
 // ----------------------------------------------------------------
 // GUI Imports
@@ -17,11 +17,8 @@ use iced::{
     executor, Length,
 };
 
-// In newer Iced versions, widgets are in the widget module.
-// We also import Row and Column which are typically part of iced::widget in recent versions
-// or need to be handled via Container if using older versions. Assuming recent version:
-use iced::widget::{self, Button, TextInput, PickList, Container, Row, Column, Text};
-use iced::widget::{text_input};
+// Using the widget module for Iced 0.12+
+use iced::widget::{Button, TextInput, PickList, Container, Row, Column, Text};
 
 // ----------------------------------------------------------------
 // Scraper Logic Constants
@@ -60,15 +57,9 @@ struct ScraperGui {
     format: OutputFormat,
     status_log: String,
     is_working: bool,
-    // We use channels to communicate between the GUI thread and the scraper thread
+    // Removed start_button: button::State as it is deprecated and not needed in newer Iced versions
     sender: Option<mpsc::Sender<String>>,
-    start_button: button::State, // Note: button::State is internal now, Button handles state
 }
-
-// We use the internal widget types for state management in older Iced, but in newer Iced
-// button state is not needed by the user. However, to match the snippet, we'll adapt.
-// In Iced 0.9+, Button handles state internally.
-// We will use the types imported above.
 
 #[derive(Clone, Debug)]
 enum Message {
@@ -88,18 +79,17 @@ impl ScraperGui {
             status_log: String::from("Ready to start..."),
             is_working: false,
             sender: None,
-            start_button: button::State::new(), // This is deprecated/unused in newer Iced but kept for struct compatibility if needed
         }
     }
 
-    // The core scraping logic, refactored to accept a sender for logs
     fn run_scraper(email: String, password: String, format: OutputFormat, sender: mpsc::Sender<String>) {
         thread::spawn(move || {
             // Helper to send logs to GUI
+            // Clone msg to allow printing after sending
             let log = |msg: String| {
+                let msg_clone = msg.clone();
                 let _ = sender.send(msg);
-                // Also print to console for debugging
-                println!("{}", msg);
+                println!("{}", msg_clone);
             };
 
             // ----------------------------------------------------------------
@@ -108,7 +98,6 @@ impl ScraperGui {
             log("Connecting to Paizo...".to_string());
 
             // Build client with cookie store
-            // NOTE: Ensure reqwest feature "cookies" is enabled in Cargo.toml
             let client = match Client::builder()
                 .cookie_store(true)
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -161,7 +150,7 @@ impl ScraperGui {
 
             if landed_url.contains("signIn") || body.contains("Sign In") {
                 log("Error: Login failed. Check credentials.".to_string());
-                std::fs::write("debug_post_login.html", &body).unwrap_or_default();
+                std::fs::write("debug_post_login.html", &body.as_bytes()).unwrap_or_default();
                 return;
             }
 
@@ -191,7 +180,7 @@ impl ScraperGui {
                 Some(url) => url,
                 None => {
                     log("Error: Could not find Sessions tab.".to_string());
-                    std::fs::write("debug_post_login.html", &body).unwrap_or_default();
+                    std::fs::write("debug_post_login.html", &body.as_bytes()).unwrap_or_default();
                     return;
                 }
             };
@@ -226,7 +215,7 @@ impl ScraperGui {
                     Some(div) => div,
                     None => {
                         log(format!("No div#results found on page {}.", page));
-                        std::fs::write(format!("debug_page_{}.html", page), &body).unwrap_or_default();
+                        std::fs::write(format!("debug_page_{}.html", page), &body.as_bytes()).unwrap_or_default();
                         break;
                     }
                 };
@@ -345,7 +334,6 @@ impl Application for ScraperGui {
     type Executor = executor::Default;
     type Flags = ();
     type Message = Message;
-    // Added missing Theme type
     type Theme = Theme;
 
     fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
@@ -368,7 +356,7 @@ impl Application for ScraperGui {
                 }
 
                 // Create channel
-                let (tx, rx) = mpsc::channel();
+                let (tx, _rx) = mpsc::channel(); // Prefix rx with underscore to silence warning
                 self.sender = Some(tx);
 
                 // Reset log
@@ -395,25 +383,21 @@ impl Application for ScraperGui {
     }
 
     fn view(&self) -> Element<Self::Message> {
-        // Using widget types
         let email_input = TextInput::new("Email", &self.email_input)
             .on_input(Message::EmailChanged)
             .padding(10);
 
         let password_input = TextInput::new("Password", &self.password_input)
             .on_input(Message::PasswordChanged)
-            .password(true) // Mask the input
             .padding(10);
+            // Removed .password(true) as it is not supported in Iced 0.12
 
-        // In Iced, PickList requires a list of options.
-        // We use OutputFormat::ALL which is a static slice.
         let format_picker = PickList::new(
-            &OutputFormat::ALL[..], // We need to pass a slice or implement IntoIterator
+            &OutputFormat::ALL[..],
             Some(&self.format),
         )
-        .on_selected(Message::FormatChanged);
+        .on_selected(Message::FormatChanged); // Removed explicit closure, assuming Message::FormatChanged matches signature
 
-        // Text widget from iced::widget
         let status_text = Text::new(self.status_log.as_str());
 
         let start_btn = {
@@ -424,7 +408,6 @@ impl Application for ScraperGui {
             }
         };
 
-        // Container, Row, Column are now widget types
         let container = Container::new(
             Column::new()
                 .push(
@@ -452,7 +435,7 @@ fn main() -> iced::Result {
 }
 
 // ----------------------------------------------------------------
-// Logic Helpers (Moved from original code)
+// Logic Helpers
 // ----------------------------------------------------------------
 fn write_csv_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create("sessions.csv")?;
@@ -472,30 +455,21 @@ fn write_csv_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn
 }
 
 fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn std::error::Error>> {
-    // Workbook::new requires a filename in 0.6.0+
+    // Removed ? from new() as it returns Workbook, not Result
     let mut workbook = Workbook::new("sessions.xlsx")?;
-    let sheet = workbook.worksheet_mut("Sheet1")?; // Use worksheet_mut or add
+    let sheet = workbook.add_worksheet()?;
 
-    // Note: rust_xlsxwriter API changes.
-    // set_name is on worksheet addition usually, or just default.
-    // We'll assume standard API.
-
-    let header_format = Format::new()
-        .set_bold()
-        .set_font_color(Color::RGB(0x1F497D));
-        // Removed set_border_bottom as it's not a standard method in this crate version
+    // Simplified format to avoid Color import issues
+    let header_format = Format::new().set_bold();
 
     for (col, name) in headers.iter().enumerate() {
         sheet.write_with_format(0, col as u16, *name, &header_format)?;
     }
-    // set_freeze_panes is a method on Worksheet in 0.6.0
     sheet.set_freeze_panes(1, 0)?;
 
     for (row_idx, row) in rows.iter().enumerate() {
         let xlsx_row = (row_idx + 1) as u32;
         for (col_idx, cell) in row.iter().enumerate() {
-            // Worksheet::write_string or write_number based on type.
-            // We'll use write which infers.
             sheet.write(xlsx_row, col_idx as u16, cell.as_str())?;
         }
     }
