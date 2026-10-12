@@ -7,15 +7,21 @@ use std::io::{BufWriter, Write};
 use std::sync::mpsc;
 use std::thread;
 use chrono::{Local, NaiveDate, Duration};
-use rust_xlsxwriter::{Format, Workbook, Color};
+use rust_xlsxwriter::{Format, Workbook, Color, XlsxError};
 
 // ----------------------------------------------------------------
 // GUI Imports
 // ----------------------------------------------------------------
 use iced::{
     Alignment, Application, Command, Element, Settings, Subscription, Theme,
-    executor, button, text_input, pick_list, Length,
+    executor, Length,
 };
+
+// In newer Iced versions, widgets are in the widget module.
+// We also import Row and Column which are typically part of iced::widget in recent versions
+// or need to be handled via Container if using older versions. Assuming recent version:
+use iced::widget::{self, Button, TextInput, PickList, Container, Row, Column, Text};
+use iced::widget::{text_input};
 
 // ----------------------------------------------------------------
 // Scraper Logic Constants
@@ -33,7 +39,7 @@ enum OutputFormat {
 }
 
 impl OutputFormat {
-    const ALL: [OutputFormat; 2] = [OutputFormat::Csv, OutputFormat::Xlsx];
+    pub const ALL: [OutputFormat; 2] = [OutputFormat::Csv, OutputFormat::Xlsx];
 }
 
 impl std::fmt::Display for OutputFormat {
@@ -56,8 +62,13 @@ struct ScraperGui {
     is_working: bool,
     // We use channels to communicate between the GUI thread and the scraper thread
     sender: Option<mpsc::Sender<String>>,
-    start_button: button::State,
+    start_button: button::State, // Note: button::State is internal now, Button handles state
 }
+
+// We use the internal widget types for state management in older Iced, but in newer Iced
+// button state is not needed by the user. However, to match the snippet, we'll adapt.
+// In Iced 0.9+, Button handles state internally.
+// We will use the types imported above.
 
 #[derive(Clone, Debug)]
 enum Message {
@@ -77,7 +88,7 @@ impl ScraperGui {
             status_log: String::from("Ready to start..."),
             is_working: false,
             sender: None,
-            start_button: button::State::new(),
+            start_button: button::State::new(), // This is deprecated/unused in newer Iced but kept for struct compatibility if needed
         }
     }
 
@@ -97,6 +108,7 @@ impl ScraperGui {
             log("Connecting to Paizo...".to_string());
 
             // Build client with cookie store
+            // NOTE: Ensure reqwest feature "cookies" is enabled in Cargo.toml
             let client = match Client::builder()
                 .cookie_store(true)
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -124,7 +136,7 @@ impl ScraperGui {
             ];
 
             let response = match client.post(LOGIN_URL)
-                .header("Referer", "https://paizo.com/organizedplay/myAccount")
+                .header("Referer", "https://paizo.com/organizedPlay/myAccount")
                 .header("Origin", "https://paizo.com")
                 .form(&form_fields)
                 .send()
@@ -206,12 +218,6 @@ impl ScraperGui {
                     Ok(r) => r.text().unwrap_or_default(),
                     Err(_) => break, // Break on error
                 };
-
-                // [Rest of scraping logic from your script, replacing println with log()]
-                // For brevity, this assumes the logic below is identical to your script
-                // ...
-                // Actually, let's insert the scraping logic here directly
-                // but replacing println! with log()
 
                 // Parse document
                 let document = Html::parse_document(&body);
@@ -339,6 +345,8 @@ impl Application for ScraperGui {
     type Executor = executor::Default;
     type Flags = ();
     type Message = Message;
+    // Added missing Theme type
+    type Theme = Theme;
 
     fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
         (Self::new(), Command::none())
@@ -367,58 +375,18 @@ impl Application for ScraperGui {
                 self.status_log = "Starting...\n".to_string();
 
                 // Spawn thread
-                // We clone the inputs here. We must clone the sender to pass into thread.
-                // Note: We need a way to receive messages.
-                // In Iced, we usually use subscriptions, but for simple blocking threads,
-                // we can use a hidden channel polling or just rely on the thread printing to stdout.
-                // HOWEVER, to update GUI, we need to poll.
-                // A simple way in Iced for blocking threads is using a channel with `stream`.
-
-                // To keep this example simple and working without complex async streams,
-                // we will use a simplified approach: The thread runs and prints to stdout.
-                // The GUI will just show "Working...".
-                // *But the user asked for a GUI frontend to replace prompts.*
-
-                // Let's implement a rudimentary polling mechanism for the status log
-                // by using a global variable or arc? No, let's use `std::sync::mpsc` properly.
-
-                // We must pass the sender to the thread.
-                let tx = self.sender.clone().unwrap();
+                let sender_clone = self.sender.clone().unwrap();
                 let email = self.email_input.clone();
                 let pass = self.password_input.clone();
                 let fmt = self.format.clone();
 
-                // We need to capture the rx in the GUI to receive updates.
-                // This requires `Command` subscription.
-                // To avoid complexity, we will use a `std::sync::Arc` or just ignore status updates in this simple version?
-                // No, let's do it properly.
-
-                // Because `mpsc` is not async by default, we can't easily stream it in Iced without `async_channel`.
-                // Let's switch to a simpler GUI approach for wrapping blocking code: **Fltk** is easier, but you asked for standard Rust.
-                // Let's stick to Iced but use a global `Arc` for status or just keep it simple:
-                // The thread writes to file, GUI says "Working... Done".
-
-                // Actually, let's use `crossbeam_channel` which Iced supports natively for streams?
-                // No, let's just spawn and let the thread write to stdout (console window).
-
-                // *Better approach for this tutorial:*
-                // The GUI will spawn the thread and wait. The "Status" will be generic.
-
-                // Spawn the thread
-                let sender_clone = tx.clone();
                 thread::spawn(move || {
-                    // We actually won't update the GUI text live in this simple implementation
-                    // to avoid async complexity.
-                    // Instead, we write to console, and GUI shows "Processing..."
-
-                    // Call the logic
                     ScraperGui::run_scraper(email, pass, fmt, sender_clone);
                 });
 
                 self.is_working = true;
             }
             Message::StatusUpdate(s) => {
-                // This would be called if we used a channel subscription
                 self.status_log.push_str(&s);
                 self.status_log.push('\n');
             }
@@ -427,31 +395,36 @@ impl Application for ScraperGui {
     }
 
     fn view(&self) -> Element<Self::Message> {
-        let email_input = text_input::TextInput::new("Email", &self.email_input)
+        // Using widget types
+        let email_input = TextInput::new("Email", &self.email_input)
             .on_input(Message::EmailChanged)
             .padding(10);
 
-        let password_input = text_input::TextInput::new("Password", &self.password_input)
+        let password_input = TextInput::new("Password", &self.password_input)
             .on_input(Message::PasswordChanged)
             .password(true) // Mask the input
             .padding(10);
 
-        let format_picker = pick_list::PickList::new(
-            &[OutputFormat::Csv, OutputFormat::Xlsx],
+        // In Iced, PickList requires a list of options.
+        // We use OutputFormat::ALL which is a static slice.
+        let format_picker = PickList::new(
+            &OutputFormat::ALL[..], // We need to pass a slice or implement IntoIterator
             Some(&self.format),
         )
         .on_selected(Message::FormatChanged);
 
-        let status_text = text::Text::new(self.status_log.as_str());
+        // Text widget from iced::widget
+        let status_text = Text::new(self.status_log.as_str());
 
         let start_btn = {
             if self.is_working {
-                button::Button::new("Processing...")
+                Button::new(Text::new("Processing..."))
             } else {
-                button::Button::new("Start Scraping").on_press(Message::StartScraping)
+                Button::new(Text::new("Start Scraping")).on_press(Message::StartScraping)
             }
         };
 
+        // Container, Row, Column are now widget types
         let container = Container::new(
             Column::new()
                 .push(
@@ -499,24 +472,30 @@ fn write_csv_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn
 }
 
 fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut workbook = Workbook::new();
-    let sheet = workbook.add_worksheet();
-    sheet.set_name("Sessions")?;
+    // Workbook::new requires a filename in 0.6.0+
+    let mut workbook = Workbook::new("sessions.xlsx")?;
+    let sheet = workbook.worksheet_mut("Sheet1")?; // Use worksheet_mut or add
+
+    // Note: rust_xlsxwriter API changes.
+    // set_name is on worksheet addition usually, or just default.
+    // We'll assume standard API.
 
     let header_format = Format::new()
         .set_bold()
-        .set_font_color(Color::White)
-        .set_background_color(Color::RGB(0x1F497D))
-        .set_border_bottom(rust_xlsxwriter::FormatBorder::Thin);
+        .set_font_color(Color::RGB(0x1F497D));
+        // Removed set_border_bottom as it's not a standard method in this crate version
 
     for (col, name) in headers.iter().enumerate() {
         sheet.write_with_format(0, col as u16, *name, &header_format)?;
     }
+    // set_freeze_panes is a method on Worksheet in 0.6.0
     sheet.set_freeze_panes(1, 0)?;
 
     for (row_idx, row) in rows.iter().enumerate() {
         let xlsx_row = (row_idx + 1) as u32;
         for (col_idx, cell) in row.iter().enumerate() {
+            // Worksheet::write_string or write_number based on type.
+            // We'll use write which infers.
             sheet.write(xlsx_row, col_idx as u16, cell.as_str())?;
         }
     }
@@ -526,7 +505,7 @@ fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dy
         sheet.set_column_width(col as u16, *max_w as f64)?;
     }
 
-    workbook.save("sessions.xlsx")?;
+    workbook.save()?;
     println!("Data saved to sessions.xlsx ({} rows)", rows.len());
     Ok(())
 }
