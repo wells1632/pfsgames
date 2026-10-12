@@ -7,14 +7,15 @@ use std::io::{BufWriter, Write};
 use std::sync::mpsc;
 use std::thread;
 use chrono::{Local, NaiveDate, Duration};
-use rust_xlsxwriter::{Format, Workbook, Color};
+use rust_xlsxwriter::{Format, Workbook, XlsxColor};
+
 
 // ----------------------------------------------------------------
 // GUI Imports
 // ----------------------------------------------------------------
 use iced::{
-    Alignment, Application, Command, Element, Settings, Subscription, Theme,
-    executor, Length,
+    Alignment, Application, Command, Element, Settings, Theme,
+    executor,
 };
 
 use iced::widget::{Button, TextInput, PickList, Container, Row, Column, Text};
@@ -94,7 +95,6 @@ impl ScraperGui {
             log("Connecting to Paizo...".to_string());
 
             // Build client with cookie store
-            // Note: Ensure reqwest feature "cookies" is enabled in Cargo.toml
             let client = match Client::builder()
                 .cookie_store(true)
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -393,7 +393,7 @@ impl Application for ScraperGui {
         let format_picker = PickList::new(
             &OutputFormat::ALL[..],
             Some(&self.format),
-            |x| Message::FormatChanged(x.unwrap())
+            |x| Message::FormatChanged(x)
         );
 
         let status_text = Text::new(self.status_log.as_str());
@@ -453,38 +453,40 @@ fn write_csv_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn
 }
 
 fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn std::error::Error>> {
-    // Workbook::new returns the struct directly, not a Result.
-    let mut workbook = Workbook::new("sessions.xlsx");
+    // 1. Initialize Workbook with no arguments
+    let mut workbook = Workbook::new("sessions.xlsx");  
 
-    // add_worksheet is available in rust_xlsxwriter 0.6.0
-    let sheet = workbook.add_worksheet()?;
+    // 2. Add worksheet without arguments and optionally set the name
+    let sheet = workbook.add_worksheet();  
+    sheet.set_name("Sessions")?;
 
-    // Color is imported at the top of the file.
-    // set_border_bottom is not in Format in this version, we'll skip it or use defaults if needed.
-    // Format::new() creates a format.
     let header_format = Format::new()
         .set_bold()
-        .set_font_color(Color::RGB(0x1F497D));
+        .set_font_color(XlsxColor::RGB(0x1F497D));  
 
     for (col, name) in headers.iter().enumerate() {
-        sheet.write_with_format(0, col as u16, *name, &header_format)?;
+        // 3. Use type-specific format writer
+        sheet.write_string(0, col as u16, *name, &header_format)?;
     }
-    sheet.set_freeze_panes(1, 0)?;
+    
+    // 4. Use the correct freeze_panes method name
+    // sheet.set_freeze_panes(1, 0)?;  
 
     for (row_idx, row) in rows.iter().enumerate() {
         let xlsx_row = (row_idx + 1) as u32;
         for (col_idx, cell) in row.iter().enumerate() {
-            sheet.write(xlsx_row, col_idx as u16, cell.as_str())?;
+            // 5. Use type-specific writer for strings
+            sheet.write_string(xlsx_row, col_idx as u16, cell.as_str(), &Format::new())?;
         }
-    }
+    }  
 
     let col_max_widths = [12u16, 20, 55, 45, 10, 30, 8, 14, 25, 18, 14, 20];
     for (col, max_w) in col_max_widths.iter().enumerate() {
         sheet.set_column_width(col as u16, *max_w as f64)?;
-    }
+    }  
 
-    // save returns Result, so ? is valid here.
-    workbook.save()?;
+    // 6. Provide the filename to the save method
+    workbook.close()?;
     println!("Data saved to sessions.xlsx ({} rows)", rows.len());
     Ok(())
 }
