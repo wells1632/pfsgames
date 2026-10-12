@@ -7,7 +7,7 @@ use std::io::{BufWriter, Write};
 use std::sync::mpsc;
 use std::thread;
 use chrono::{Local, NaiveDate, Duration};
-use rust_xlsxwriter::{Format, Workbook};
+use rust_xlsxwriter::{Format, Workbook, Color};
 
 // ----------------------------------------------------------------
 // GUI Imports
@@ -17,7 +17,6 @@ use iced::{
     executor, Length,
 };
 
-// Using the widget module for Iced 0.12+
 use iced::widget::{Button, TextInput, PickList, Container, Row, Column, Text};
 
 // ----------------------------------------------------------------
@@ -57,7 +56,6 @@ struct ScraperGui {
     format: OutputFormat,
     status_log: String,
     is_working: bool,
-    // Removed start_button: button::State as it is deprecated and not needed in newer Iced versions
     sender: Option<mpsc::Sender<String>>,
 }
 
@@ -84,8 +82,6 @@ impl ScraperGui {
 
     fn run_scraper(email: String, password: String, format: OutputFormat, sender: mpsc::Sender<String>) {
         thread::spawn(move || {
-            // Helper to send logs to GUI
-            // Clone msg to allow printing after sending
             let log = |msg: String| {
                 let msg_clone = msg.clone();
                 let _ = sender.send(msg);
@@ -98,6 +94,7 @@ impl ScraperGui {
             log("Connecting to Paizo...".to_string());
 
             // Build client with cookie store
+            // Note: Ensure reqwest feature "cookies" is enabled in Cargo.toml
             let client = match Client::builder()
                 .cookie_store(true)
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -356,7 +353,7 @@ impl Application for ScraperGui {
                 }
 
                 // Create channel
-                let (tx, _rx) = mpsc::channel(); // Prefix rx with underscore to silence warning
+                let (tx, _rx) = mpsc::channel();
                 self.sender = Some(tx);
 
                 // Reset log
@@ -390,13 +387,14 @@ impl Application for ScraperGui {
         let password_input = TextInput::new("Password", &self.password_input)
             .on_input(Message::PasswordChanged)
             .padding(10);
-            // Removed .password(true) as it is not supported in Iced 0.12
 
+        // PickList::new takes 3 arguments: options, selected, and the on_change handler.
+        // We map the Option<OutputFormat> to Message.
         let format_picker = PickList::new(
             &OutputFormat::ALL[..],
             Some(&self.format),
-        )
-        .on_selected(Message::FormatChanged); // Removed explicit closure, assuming Message::FormatChanged matches signature
+            |x| Message::FormatChanged(x.unwrap())
+        );
 
         let status_text = Text::new(self.status_log.as_str());
 
@@ -455,12 +453,18 @@ fn write_csv_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn
 }
 
 fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn std::error::Error>> {
-    // Removed ? from new() as it returns Workbook, not Result
-    let mut workbook = Workbook::new("sessions.xlsx")?;
+    // Workbook::new returns the struct directly, not a Result.
+    let mut workbook = Workbook::new("sessions.xlsx");
+
+    // add_worksheet is available in rust_xlsxwriter 0.6.0
     let sheet = workbook.add_worksheet()?;
 
-    // Simplified format to avoid Color import issues
-    let header_format = Format::new().set_bold();
+    // Color is imported at the top of the file.
+    // set_border_bottom is not in Format in this version, we'll skip it or use defaults if needed.
+    // Format::new() creates a format.
+    let header_format = Format::new()
+        .set_bold()
+        .set_font_color(Color::RGB(0x1F497D));
 
     for (col, name) in headers.iter().enumerate() {
         sheet.write_with_format(0, col as u16, *name, &header_format)?;
@@ -479,6 +483,7 @@ fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dy
         sheet.set_column_width(col as u16, *max_w as f64)?;
     }
 
+    // save returns Result, so ? is valid here.
     workbook.save()?;
     println!("Data saved to sessions.xlsx ({} rows)", rows.len());
     Ok(())
