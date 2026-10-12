@@ -2,12 +2,34 @@ use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use chrono::{Local, NaiveDate, Datelike, Duration};
+use chrono::{Local, NaiveDate, Duration};
+use rust_xlsxwriter::{Format, Workbook, Color};
 
 const LOGIN_URL: &str = "https://paizo.com/cgi-bin/WebObjects/Store.woa/wa/DirectAction/signIn?path=organizedplay/myAccount";
 const BASE_URL: &str = "https://paizo.com";
 
+// ----------------------------------------------------------------
+// Output format selected at startup
+// ----------------------------------------------------------------
+#[derive(PartialEq)]
+enum OutputFormat {
+    Csv,
+    Xlsx,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ----------------------------------------------------------------
+    // Prompt for output format
+    // ----------------------------------------------------------------
+    print!("Output format [csv/xlsx] (default: csv): ");
+    io::stdout().flush()?;
+    let mut fmt_input = String::new();
+    io::stdin().read_line(&mut fmt_input)?;
+    let output_format = match fmt_input.trim().to_lowercase().as_str() {
+        "xlsx" => OutputFormat::Xlsx,
+        _ => OutputFormat::Csv,
+    };
+
     // Prompt for credentials
     print!("Email: ");
     io::stdout().flush()?;
@@ -31,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .send()?;
 
     // ----------------------------------------------------------------
-    // Step 2: POST credentials using the correct field names
+    // Step 2: POST credentials
     // ----------------------------------------------------------------
     let form_fields = [
         ("path", "organizedplay/myAccount"),
@@ -53,7 +75,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let body = response.text()?;
     println!("Landed on: {}", landed_url);
 
-    // Check if login failed (i.e. we're back on the login page)
     if landed_url.contains("signIn") || body.contains("Sign In") {
         eprintln!("Login appears to have failed. Check your credentials.");
         std::fs::write("debug_post_login.html", &body)?;
@@ -61,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ----------------------------------------------------------------
-    // Step 3: Find and navigate to the "Sessions" tab
+    // Step 3: Find the Sessions tab URL
     // ----------------------------------------------------------------
     let document = Html::parse_document(&body);
     let link_selector = Selector::parse("a").unwrap();
@@ -94,11 +115,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Sessions URL: {}", sessions_url);
 
     // ----------------------------------------------------------------
-    // Step 4: Paginate through the sessions table
+    // Step 4: Collect all rows across all pages
     // ----------------------------------------------------------------
-    let output_file = File::create("sessions.csv")?;
-    let mut writer = BufWriter::new(output_file);
-    let mut headers_written = false;
+    // We collect into a Vec<Vec<String>> first so both output paths
+    // share a single scraping loop.
+    // ----------------------------------------------------------------
+    let header_names = vec![
+        "Date", "GM", "Scenario", "Points",
+        "Event ID", "Event Name",
+        "Session", "Player", "Character",
+        "Faction", "Prest. / Rep.", "Notes",
+    ];
+
+    let mut all_rows: Vec<Vec<String>> = Vec::new();
 
     let mut current_url = sessions_url.clone();
     let mut page = 1;
@@ -108,7 +137,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let body = client.get(&current_url).send()?.text()?;
         let document = Html::parse_document(&body);
 
-        // Scope to div#results
         let results_selector = Selector::parse("div#results").unwrap();
         let results_div = match document.select(&results_selector).next() {
             Some(div) => div,
@@ -119,7 +147,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        // Skip the pagination table, grab the data table
         let table_selector = Selector::parse("table").unwrap();
         let mut tables = results_div.select(&table_selector);
         tables.next(); // skip pagination table
@@ -133,28 +160,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let row_selector = Selector::parse("tr").unwrap();
         let cell_selector = Selector::parse("td, th").unwrap();
+        let expansion_selector = Selector::parse("a.expansion").unwrap();
 
-        let mut data_rows_found = 0;
+        let mut page_rows = 0;
         for row in data_table.select(&row_selector) {
+            // Skip Show Seats rows
+            if row.select(&expansion_selector).next().is_some() {
+                continue;
+            }
+
             let cells: Vec<String> = row
                 .select(&cell_selector)
-                .map(|cell| cell.text().collect::<String>().trim().to_string())
+                .map(|cell| {
+                    cell.text()
+                        .collect::<String>()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
                 .collect();
 
-            if cells.is_empty() {
+            // Skip blank / separator rows
+            if cells.iter().all(|c| c.trim().is_empty()) {
                 continue;
             }
 
-            // Discard "Show Seats" rows
-            if cells.len() == 1 && cells[0].trim() == "Show Seats" {
-                continue;
-            }
-            // Discard "Show Seats" rows
-            if cells.len() == 1 && cells[0].trim() == "Show" {
+            // Skip header rows (detected or repeated)
+            if cells.first().map(|c| c.trim() == "Date").unwrap_or(false) {
                 continue;
             }
 
-            // Drop the last column ("Edit")
+            // Drop the trailing "Edit" column
             let cells: Vec<String> = cells
                 .into_iter()
                 .rev()
@@ -164,46 +200,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .rev()
                 .collect();
 
-            // Normalize the date in the first column
+            // Normalize date in first column
             let cells: Vec<String> = cells
                 .into_iter()
                 .enumerate()
-                .map(|(i, val)| {
-                    if i == 0 {
-                        normalize_date(&val)
-                    } else {
-                        val
-                    }
-                })
+                .map(|(i, val)| if i == 0 { normalize_date(&val) } else { val })
                 .collect();
 
-            // CSV-escape all values
-            let csv_cells: Vec<String> = cells
-                .iter()
-                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-                .collect();
-
-            // Write header only on first page
-            if !headers_written {
-                writeln!(writer, "{}", csv_cells.join(","))?;
-                headers_written = true;
-                continue;
-            }
-
-            // Skip header rows on subsequent pages (first row of each page)
-            if data_rows_found == 0 && page > 1 {
-                data_rows_found += 1;
-                continue;
-            }
-
-            writeln!(writer, "{}", csv_cells.join(","))?;
-            data_rows_found += 1;
+            all_rows.push(cells);
+            page_rows += 1;
         }
 
-        writer.flush()?;
-        println!("Page {}: {} rows written.", page, data_rows_found);
+        println!("Page {}: {} rows collected.", page, page_rows);
 
-        // Follow the "next >" href directly
         let link_selector = Selector::parse("a").unwrap();
         let next_href = results_div.select(&link_selector).find_map(|a| {
             let text = a.text().collect::<String>().to_lowercase();
@@ -215,51 +224,163 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
         match next_href {
-            Some(url) => {
-                current_url = url;
-                page += 1;
-            }
-            None => {
-                println!("No next page link found. Done.");
-                break;
-            }
+            Some(url) => { current_url = url; page += 1; }
+            None => { println!("No next page link found. Done."); break; }
         }
     }
 
-    println!("Data saved to sessions.csv");
+    // ----------------------------------------------------------------
+    // Step 5: Write output in the chosen format
+    // ----------------------------------------------------------------
+    match output_format {
+        OutputFormat::Csv => write_csv(&header_names, &all_rows)?,
+        OutputFormat::Xlsx => write_xlsx(&header_names, &all_rows)?,
+    }
+
     Ok(())
 }
 
 // ----------------------------------------------------------------
-    // Helper: normalize date strings to dd-mmm-yy
-    // ----------------------------------------------------------------
-    fn normalize_date(date_str: &str) -> String {
-        let today = Local::now().date_naive();
-        let trimmed = date_str.trim();
+// CSV output
+// ----------------------------------------------------------------
+fn write_csv(
+    headers: &[&str],
+    rows: &[Vec<String>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create("sessions.csv")?;
+    let mut writer = BufWriter::new(file);
 
-        // Format 1: "Saturday" / "Monday" etc. (within last week)
-        let weekdays = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
-        if weekdays.iter().any(|d| *d == trimmed) {
-            // Walk back up to 7 days to find matching weekday
-            for days_ago in 0..7 {
-                let candidate = today - Duration::days(days_ago);
-                let weekday_name = candidate.format("%A").to_string();
-                if weekday_name == trimmed {
-                    return candidate.format("%d-%b-%y").to_string();
-                }
+    let csv_header: Vec<String> = headers
+        .iter()
+        .map(|h| format!("\"{}\"", h))
+        .collect();
+    writeln!(writer, "{}", csv_header.join(","))?;
+
+    for row in rows {
+        let csv_cells: Vec<String> = row
+            .iter()
+            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect();
+        writeln!(writer, "{}", csv_cells.join(","))?;
+    }
+
+    writer.flush()?;
+    println!("Data saved to sessions.csv ({} rows)", rows.len());
+    Ok(())
+}
+
+// ----------------------------------------------------------------
+// XLSX output
+// ----------------------------------------------------------------
+fn write_xlsx(
+    headers: &[&str],
+    rows: &[Vec<String>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("Sessions")?;
+
+    // Header format: bold white text on a dark blue background
+    let header_format = Format::new()
+        .set_bold()
+        .set_font_color(Color::White)
+        .set_background_color(Color::RGB(0x1F497D))
+        .set_border_bottom(rust_xlsxwriter::FormatBorder::Thin);
+
+    // Write header row
+    for (col, name) in headers.iter().enumerate() {
+        sheet.write_with_format(0, col as u16, *name, &header_format)?;
+    }
+
+    // Freeze the header row so it stays visible when scrolling
+    sheet.set_freeze_panes(1, 0)?;
+
+    // Write data rows
+    for (row_idx, row) in rows.iter().enumerate() {
+        let xlsx_row = (row_idx + 1) as u32;
+        for (col_idx, cell) in row.iter().enumerate() {
+            sheet.write(xlsx_row, col_idx as u16, cell.as_str())?;
+        }
+    }
+
+    // Auto-fit column widths (capped so Scenario/Points don't go wild)
+    let col_max_widths = [12u16, 20, 55, 45, 10, 30, 8, 14, 25, 18, 14, 20];
+    for (col, max_w) in col_max_widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *max_w as f64)?;
+    }
+
+    workbook.save("sessions.xlsx")?;
+    println!("Data saved to sessions.xlsx ({} rows)", rows.len());
+    Ok(())
+}
+
+// ----------------------------------------------------------------
+// Helper: normalize date strings to dd-mmm-yy
+// ----------------------------------------------------------------
+fn normalize_date(date_str: &str) -> String {
+    let today = Local::now().date_naive();
+    let trimmed = date_str.trim();
+
+    // Format 1: "Saturday" / "Monday" etc. (within last week)
+    let weekdays = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+    if weekdays.iter().any(|d| *d == trimmed) {
+        for days_ago in 0..7 {
+            let candidate = today - Duration::days(days_ago);
+            let weekday_name = candidate.format("%A").to_string();
+            if weekday_name == trimmed {
+                return candidate.format("%d-%b-%y").to_string();
             }
         }
-
-        // Format 2: "Sat, Mar 15, 2025" (within last month)
-        if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%a, %b %d, %Y") {
-            return d.format("%d-%b-%y").to_string();
-        }
-
-        // Format 3: Already in "15-Mar-25" form — return as-is
-        if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%d-%b-%y") {
-            return d.format("%d-%b-%y").to_string();
-        }
-
-        // Fallback: return original if we can't parse it
-        trimmed.to_string()
     }
+
+    // Format 2: "Sat, Oct 3, 2026" (single-digit day from <time> element)
+    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%a, %b %e, %Y") {
+        return d.format("%d-%b-%y").to_string();
+    }
+
+    // Format 3: "Sat, Mar 15, 2025" (two-digit day)
+    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%a, %b %d, %Y") {
+        return d.format("%d-%b-%y").to_string();
+    }
+
+    // Format 4: Already in "15-Mar-25" form — return as-is
+    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%d-%b-%y") {
+        return d.format("%d-%b-%y").to_string();
+    }
+
+    // Fallback
+    trimmed.to_string()
+}
+
+// ----------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_long_date_zero_padded() {
+        assert_eq!(normalize_date("Sat, Mar 15, 2025"), "15-Mar-25");
+    }
+
+    #[test]
+    fn test_long_date_single_digit() {
+        assert_eq!(normalize_date("Sat, Oct 3, 2026"), "03-Oct-26");
+    }
+
+    #[test]
+    fn test_already_normalized() {
+        assert_eq!(normalize_date("03-Oct-26"), "03-Oct-26");
+    }
+
+    #[test]
+    fn test_fallback_unknown() {
+        assert_eq!(normalize_date("  some garbage  "), "some garbage");
+    }
+
+    #[test]
+    fn test_whitespace_trimming() {
+        assert_eq!(normalize_date("  Sat, Oct 3, 2026  "), "03-Oct-26");
+    }
+}
