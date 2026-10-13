@@ -8,9 +8,6 @@ use rust_xlsxwriter::{Format, Workbook, Color};
 const LOGIN_URL: &str = "https://paizo.com/cgi-bin/WebObjects/Store.woa/wa/DirectAction/signIn?path=organizedplay/myAccount";
 const BASE_URL: &str = "https://paizo.com";
 
-// ----------------------------------------------------------------
-// Output format selected at startup
-// ----------------------------------------------------------------
 #[derive(PartialEq)]
 enum OutputFormat {
     Csv,
@@ -18,9 +15,6 @@ enum OutputFormat {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ----------------------------------------------------------------
-    // Prompt for output format
-    // ----------------------------------------------------------------
     print!("Output format [csv/xlsx] (default: csv): ");
     io::stdout().flush()?;
     let mut fmt_input = String::new();
@@ -30,7 +24,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => OutputFormat::Csv,
     };
 
-    // Prompt for credentials
     print!("Email: ");
     io::stdout().flush()?;
     let mut email = String::new();
@@ -38,19 +31,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let email = email.trim().to_string();
     let password = rpassword::prompt_password("Password: ")?;
 
-    // Build client with cookie store
     let client = Client::builder()
         .cookie_store(true)
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?;
 
+    let mut request_count: u32 = 0; // +++ ADDED
+
     // ----------------------------------------------------------------
-    // Step 1: GET the login page first to establish session cookies
+    // Step 1: GET the login page to establish session cookies
     // ----------------------------------------------------------------
     client
         .get("https://paizo.com/organizedPlay/myAccount")
         .send()?;
+    request_count += 1; // +++ ADDED
 
     // ----------------------------------------------------------------
     // Step 2: POST credentials
@@ -70,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .header("Origin", "https://paizo.com")
         .form(&form_fields)
         .send()?;
+    request_count += 1; // +++ ADDED
 
     let landed_url = response.url().to_string();
     let body = response.text()?;
@@ -78,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if landed_url.contains("signIn") || body.contains("Sign In") {
         eprintln!("Login appears to have failed. Check your credentials.");
         std::fs::write("debug_post_login.html", &body)?;
+        println!("Total HTTP requests made: {}", request_count); // +++ ADDED
         return Ok(());
     }
 
@@ -108,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             eprintln!("Could not find Sessions tab. Saving page to debug_post_login.html.");
             std::fs::write("debug_post_login.html", &body)?;
+            println!("Total HTTP requests made: {}", request_count); // +++ ADDED
             return Ok(());
         }
     };
@@ -117,9 +115,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ----------------------------------------------------------------
     // Step 4: Collect all rows across all pages
     // ----------------------------------------------------------------
-    // We collect into a Vec<Vec<String>> first so both output paths
-    // share a single scraping loop.
-    // ----------------------------------------------------------------
     let header_names = vec![
         "Date", "GM", "Scenario", "Points",
         "Event ID", "Event Name",
@@ -128,13 +123,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let mut all_rows: Vec<Vec<String>> = Vec::new();
-
     let mut current_url = sessions_url.clone();
     let mut page = 1;
 
     loop {
         println!("Fetching page {}...", page);
         let body = client.get(&current_url).send()?.text()?;
+        request_count += 1; // +++ ADDED
+
         let document = Html::parse_document(&body);
 
         let results_selector = Selector::parse("div#results").unwrap();
@@ -149,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let table_selector = Selector::parse("table").unwrap();
         let mut tables = results_div.select(&table_selector);
-        tables.next(); // skip pagination table
+        tables.next();
         let data_table = match tables.next() {
             Some(t) => t,
             None => {
@@ -164,7 +160,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut page_rows = 0;
         for row in data_table.select(&row_selector) {
-            // Skip Show Seats rows
             if row.select(&expansion_selector).next().is_some() {
                 continue;
             }
@@ -180,17 +175,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
 
-            // Skip blank / separator rows
             if cells.iter().all(|c| c.trim().is_empty()) {
                 continue;
             }
 
-            // Skip header rows (detected or repeated)
             if cells.first().map(|c| c.trim() == "Date").unwrap_or(false) {
                 continue;
             }
 
-            // Drop the trailing "Edit" column
             let cells: Vec<String> = cells
                 .into_iter()
                 .rev()
@@ -200,7 +192,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .rev()
                 .collect();
 
-            // Normalize date in first column
             let cells: Vec<String> = cells
                 .into_iter()
                 .enumerate()
@@ -237,9 +228,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OutputFormat::Xlsx => write_xlsx(&header_names, &all_rows)?,
     }
 
+    println!("Total HTTP requests made: {}", request_count); // +++ ADDED
     Ok(())
 }
-
 // ----------------------------------------------------------------
 // CSV output
 // ----------------------------------------------------------------
