@@ -11,7 +11,10 @@ use std::sync::mpsc;
 use std::thread;
 use chrono::{Local, NaiveDate, Duration};
 use rust_xlsxwriter::{Format, Workbook, XlsxColor};
-
+use iced::keyboard;
+use iced::keyboard::key::Named;
+use iced::{event, Event};
+use iced::subscription;
 
 // ----------------------------------------------------------------
 // GUI Imports
@@ -417,7 +420,7 @@ impl Application for ScraperGui {
 	let password_input: TextInput<'_, Message, Theme, iced::Renderer> = TextInput::new("Password", &self.password_input)
 	    .id(text_input::Id::new("password"))
 	    .on_input(Message::PasswordChanged)
-	    .on_submit(Message::StartScraping)
+//	    .on_submit(Message::StartScraping)
 	    .padding(10)
 	    .secure(true);
 	
@@ -453,11 +456,24 @@ impl Application for ScraperGui {
                 .padding(20)
                 .align_items(Alignment::Start)
         );
-	let email_id = text_input::Id::new("email");
-	let password_id = text_input::Id::new("password");
+//	let email_id = text_input::Id::new("email");
+//	let password_id = text_input::Id::new("password");
 
 
         container.into()
+    }
+    fn subscription(&self) -> iced::Subscription<Message> {
+	event::listen_with(|event, _status| {
+            if let Event::Keyboard(keyboard::Event::KeyPressed {
+		key: keyboard::Key::Named(Named::Tab),
+		..
+            }) = event
+            {
+		Some(Message::TabPressed)
+            } else {
+		None
+            }
+	})
     }
 }
 
