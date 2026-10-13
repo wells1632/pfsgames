@@ -1,5 +1,8 @@
 // src/main.rs
 
+// Launch only as a GUI app, with no console, on release builds
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use std::fs::File;
@@ -18,7 +21,7 @@ use iced::{
     executor,
 };
 
-use iced::widget::{Button, TextInput, PickList, Container, Row, Column, Text};
+use iced::widget::{Button, TextInput, PickList, Container, Row, Column, Text, text_input};
 
 // ----------------------------------------------------------------
 // Scraper Logic Constants
@@ -51,6 +54,13 @@ impl std::fmt::Display for OutputFormat {
 // ----------------------------------------------------------------
 // GUI Application State
 // ----------------------------------------------------------------
+#[derive(Clone, Debug, PartialEq)]
+enum FocusedField {
+    Email,
+    Password,
+    None,
+}
+
 struct ScraperGui {
     email_input: String,
     password_input: String,
@@ -58,6 +68,7 @@ struct ScraperGui {
     status_log: String,
     is_working: bool,
     sender: Option<mpsc::Sender<String>>,
+    focused_field: FocusedField,
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +78,9 @@ enum Message {
     FormatChanged(OutputFormat),
     StartScraping,
     StatusUpdate(String),
+    TabPressed,
+    EmailFocused,
+    PasswordFocused,
 }
 
 impl ScraperGui {
@@ -78,6 +92,7 @@ impl ScraperGui {
             status_log: String::from("Ready to start..."),
             is_working: false,
             sender: None,
+	    focused_field: FocusedField::None,
         }
     }
 
@@ -375,19 +390,37 @@ impl Application for ScraperGui {
                 self.status_log.push_str(&s);
                 self.status_log.push('\n');
             }
+	    Message::TabPressed => {
+		self.focused_field = match self.focused_field {
+		    FocusedField::Email => FocusedField::Password,
+		    _ => FocusedField::Email,
+		};
+		return match self.focused_field {
+		    FocusedField::Password => text_input::focus(text_input::Id::new("password")),
+		    _ => text_input::focus(text_input::Id::new("email")),
+		};
+	    }
+	    Message::EmailFocused => { self.focused_field = FocusedField::Email; }
+	    Message::PasswordFocused => { self.focused_field = FocusedField::Password; }
         }
+
+	
         Command::none()
     }
 
     fn view(&self) -> Element<Self::Message> {
-        let email_input = TextInput::new("Email", &self.email_input)
-            .on_input(Message::EmailChanged)
-            .padding(10);
-
-        let password_input = TextInput::new("Password", &self.password_input)
-            .on_input(Message::PasswordChanged)
-            .padding(10);
-
+	let email_input = TextInput::<'_, Message, Theme, iced::Renderer>::new("Email", &self.email_input)
+	    .id(text_input::Id::new("email"))
+	    .on_input(Message::EmailChanged)
+	    .on_submit(Message::TabPressed)
+	    .padding(10);	
+	let password_input: TextInput<'_, Message, Theme, iced::Renderer> = TextInput::new("Password", &self.password_input)
+	    .id(text_input::Id::new("password"))
+	    .on_input(Message::PasswordChanged)
+	    .on_submit(Message::StartScraping)
+	    .padding(10)
+	    .secure(true);
+	
         // PickList::new takes 3 arguments: options, selected, and the on_change handler.
         // We map the Option<OutputFormat> to Message.
         let format_picker = PickList::new(
@@ -420,6 +453,9 @@ impl Application for ScraperGui {
                 .padding(20)
                 .align_items(Alignment::Start)
         );
+	let email_id = text_input::Id::new("email");
+	let password_id = text_input::Id::new("password");
+
 
         container.into()
     }

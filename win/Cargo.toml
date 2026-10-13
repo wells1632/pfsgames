@@ -13,3 +13,10 @@ rust_xlsxwriter = "0.6"
 # GUI dependencies
 iced = "0.12"
 # Note: Iced 0.12 requires a compatible Rust toolchain (1.75+)
+
+[[bin]]
+name = "your_app_name"
+path = "src/main.rs"
+
+[package.metadata.winres]
+# optional, for icon etc.
