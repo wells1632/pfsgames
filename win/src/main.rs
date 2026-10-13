@@ -84,8 +84,6 @@ enum Message {
     StartScraping,
     StatusUpdate(String),
     TabPressed,
-    EmailFocused,
-    PasswordFocused,
     ChooseOutputPath,
     OutputPathChosen(Option<String>),
     OutputPathChanged(String),
@@ -430,8 +428,6 @@ impl Application for ScraperGui {
 		    _ => text_input::focus(text_input::Id::new("email")),
 		};
 	    }
-	    Message::EmailFocused => { self.focused_field = FocusedField::Email; }
-	    Message::PasswordFocused => { self.focused_field = FocusedField::Password; }
 
 	    Message::ChooseOutputPath => {
 		let extension = match self.format {
@@ -465,7 +461,7 @@ impl Application for ScraperGui {
         Command::none()
     }
 
-    fn view(&self) -> Element<Self::Message> {
+    fn view(&self) -> Element<'_, Self::Message> {
 	let email_input = TextInput::<'_, Message, Theme, iced::Renderer>::new("Email", &self.email_input)
 	    .id(text_input::Id::new("email"))
 	    .on_input(Message::EmailChanged)
