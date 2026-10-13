@@ -9,12 +9,12 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::mpsc;
 use std::thread;
+use std::sync::{Arc, Mutex};
 use chrono::{Local, NaiveDate, Duration};
 use rust_xlsxwriter::{Format, Workbook, XlsxColor};
 use iced::keyboard;
 use iced::keyboard::key::Named;
 use iced::{event, Event};
-use iced::subscription;
 
 // ----------------------------------------------------------------
 // GUI Imports
@@ -71,7 +71,9 @@ struct ScraperGui {
     status_log: String,
     is_working: bool,
     sender: Option<mpsc::Sender<String>>,
+    receiver: Option<Arc<Mutex<mpsc::Receiver<String>>>>,
     focused_field: FocusedField,
+    output_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +86,9 @@ enum Message {
     TabPressed,
     EmailFocused,
     PasswordFocused,
+    ChooseOutputPath,
+    OutputPathChosen(Option<String>),
+    OutputPathChanged(String),
 }
 
 impl ScraperGui {
@@ -95,11 +100,13 @@ impl ScraperGui {
             status_log: String::from("Ready to start..."),
             is_working: false,
             sender: None,
-	    focused_field: FocusedField::None,
+            receiver: None,
+            focused_field: FocusedField::None,
+            output_path: String::new(),
         }
     }
 
-    fn run_scraper(email: String, password: String, format: OutputFormat, sender: mpsc::Sender<String>) {
+    fn run_scraper(email: String, password: String, format: OutputFormat, output_path: String, sender: mpsc::Sender<String>) {
         thread::spawn(move || {
             let log = |msg: String| {
                 let msg_clone = msg.clone();
@@ -322,19 +329,20 @@ impl ScraperGui {
             // ----------------------------------------------------------------
             // Step 4: Write Output
             // ----------------------------------------------------------------
-            match format {
-                OutputFormat::Csv => {
-                    log("Writing CSV...".to_string());
-                    let _ = write_csv_logic(&header_names, &all_rows);
-                    log("Saved to sessions.csv".to_string());
-                }
-                OutputFormat::Xlsx => {
-                    log("Writing XLSX...".to_string());
-                    let _ = write_xlsx_logic(&header_names, &all_rows);
-                    log("Saved to sessions.xlsx".to_string());
-                }
-            }
 
+	    match format {
+		OutputFormat::Csv => {
+		    log("Writing CSV...".to_string());
+		    let _ = write_csv_logic(&header_names, &all_rows, &output_path);
+		    log(format!("Saved to {}", output_path));
+		}
+		OutputFormat::Xlsx => {
+		    log("Writing XLSX...".to_string());
+		    let _ = write_xlsx_logic(&header_names, &all_rows, &output_path);
+		    log(format!("Saved to {}", output_path));
+		}
+	    }
+	    
             // Signal end of work
             let _ = sender.send("DONE".to_string());
         });
@@ -364,35 +372,54 @@ impl Application for ScraperGui {
             Message::EmailChanged(s) => self.email_input = s,
             Message::PasswordChanged(s) => self.password_input = s,
             Message::FormatChanged(f) => self.format = f,
-            Message::StartScraping => {
-                if self.email_input.is_empty() || self.password_input.is_empty() {
-                    self.status_log = "Error: Please enter email and password.".to_string();
-                    return Command::none();
-                }
+	    Message::StartScraping => {
+		if self.email_input.is_empty() || self.password_input.is_empty() {
+		    self.status_log = "Error: Please enter email and password.".to_string();
+		    return Command::none();
+		}
+		if self.output_path.is_empty() {
+		    self.status_log = "Error: Please choose an output file path.".to_string();
+		    return Command::none();
+		}
+		let (tx, rx) = mpsc::channel();
+		let rx = Arc::new(Mutex::new(rx));
+		self.sender = Some(tx);
+		self.receiver = Some(rx.clone());
+		self.status_log = "Starting...\n".to_string();
+		self.is_working = true;
 
-                // Create channel
-                let (tx, _rx) = mpsc::channel();
-                self.sender = Some(tx);
+		let sender_clone = self.sender.clone().unwrap();
+		let email = self.email_input.clone();
+		let pass = self.password_input.clone();
+		let fmt = self.format.clone();
+		let output_path = self.output_path.clone();
 
-                // Reset log
-                self.status_log = "Starting...\n".to_string();
+		thread::spawn(move || {
+		    ScraperGui::run_scraper(email, pass, fmt, output_path, sender_clone);
+		});
 
-                // Spawn thread
-                let sender_clone = self.sender.clone().unwrap();
-                let email = self.email_input.clone();
-                let pass = self.password_input.clone();
-                let fmt = self.format.clone();
+		return Command::perform(
+		    async move { rx.lock().unwrap().recv().unwrap_or("DONE".to_string()) },
+		    Message::StatusUpdate,
+		);
+	    }
 
-                thread::spawn(move || {
-                    ScraperGui::run_scraper(email, pass, fmt, sender_clone);
-                });
+	    Message::StatusUpdate(s) => {
+		if s == "DONE" {
+		    self.is_working = false;
+		    self.status_log.push_str("Done!\n");
+		} else {
+		    self.status_log.push_str(&s);
+		    self.status_log.push('\n');
 
-                self.is_working = true;
-            }
-            Message::StatusUpdate(s) => {
-                self.status_log.push_str(&s);
-                self.status_log.push('\n');
-            }
+		    if let Some(rx) = self.receiver.clone() {
+			return Command::perform(
+			    async move { rx.lock().unwrap().recv().unwrap_or("DONE".to_string()) },
+			    Message::StatusUpdate,
+			);
+		    }
+		}
+	    }
 	    Message::TabPressed => {
 		self.focused_field = match self.focused_field {
 		    FocusedField::Email => FocusedField::Password,
@@ -405,6 +432,33 @@ impl Application for ScraperGui {
 	    }
 	    Message::EmailFocused => { self.focused_field = FocusedField::Email; }
 	    Message::PasswordFocused => { self.focused_field = FocusedField::Password; }
+
+	    Message::ChooseOutputPath => {
+		let extension = match self.format {
+		    OutputFormat::Csv => "csv",
+		    OutputFormat::Xlsx => "xlsx",
+		};
+		return Command::perform(
+		    async move {
+			rfd::AsyncFileDialog::new()
+			    .add_filter("Output file", &[extension])
+			    .set_file_name(format!("sessions.{}", extension))
+			    .save_file()
+			    .await
+			    .map(|f| f.path().to_string_lossy().to_string())
+		    },
+		    Message::OutputPathChosen,
+		);
+	    }
+	    Message::OutputPathChosen(path) => {
+		if let Some(p) = path {
+		    self.output_path = p;
+		}
+	    }
+	    Message::OutputPathChanged(s) => {
+		self.output_path = s;
+	    }
+	    
         }
 
 	
@@ -432,6 +486,22 @@ impl Application for ScraperGui {
             |x| Message::FormatChanged(x)
         );
 
+	let path_input = TextInput::<'_, Message, Theme, iced::Renderer>::new(
+	    "Output file path...",
+	    &self.output_path,
+	)
+	    .on_input(Message::OutputPathChanged)
+	    .padding(10);
+
+	let browse_btn = Button::new(Text::new("Browse..."))
+	    .on_press(Message::ChooseOutputPath);
+
+	let path_row = Row::new()
+	    .push(path_input)
+	    .push(browse_btn)
+	    .spacing(10);
+
+	
         let status_text = Text::new(self.status_log.as_str());
 
         let start_btn = {
@@ -450,6 +520,7 @@ impl Application for ScraperGui {
                         .push(password_input)
                 )
                 .push(format_picker)
+		.push(path_row)
                 .push(start_btn)
                 .push(status_text)
                 .spacing(20)
@@ -487,8 +558,9 @@ fn main() -> iced::Result {
 // ----------------------------------------------------------------
 // Logic Helpers
 // ----------------------------------------------------------------
-fn write_csv_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::create("sessions.csv")?;
+fn write_csv_logic(headers: &[&str], rows: &[Vec<String>], path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create(path)?;
+
     let mut writer = BufWriter::new(file);
 
     let csv_header: Vec<String> = headers.iter().map(|h| format!("\"{}\"", h)).collect();
@@ -504,9 +576,10 @@ fn write_csv_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn
     Ok(())
 }
 
-fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>]) -> Result<(), Box<dyn std::error::Error>> {
+fn write_xlsx_logic(headers: &[&str], rows: &[Vec<String>], path: &str) -> Result<(), Box<dyn std::error::Error>> {
+
     // 1. Initialize Workbook with no arguments
-    let mut workbook = Workbook::new("sessions.xlsx");  
+    let mut workbook = Workbook::new(path);  
 
     // 2. Add worksheet without arguments and optionally set the name
     let sheet = workbook.add_worksheet();  
