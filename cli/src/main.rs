@@ -235,6 +235,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ----------------------------------------------------------------
+    // Step 4b: Enrich rows that have bare player IDs (GM rows with
+    //          "Show Seats") by looking up the full character ID from
+    //          the character records we scraped in Step 2.
+    //
+    // The "Player" field is column 7 (0-indexed) and the "Character"
+    // field is column 8.  Rows where the player ID has no hyphen are
+    // the GM rows — we match on the character name to find the suffix.
+    // ----------------------------------------------------------------
+    // Build a name -> full character ID lookup from our character records.
+    let name_to_char_id: std::collections::HashMap<String, String> = character_records
+	.iter()
+	.map(|r| (r.name.to_lowercase(), r.number.clone()))
+	.collect();
+    
+    for row in all_rows.iter_mut() {
+	// Column 7 = Player, Column 8 = Character name
+	// Only act when the player field exists and has no hyphen.
+	let needs_enrichment = row
+            .get(7)
+            .map(|p| !p.trim().is_empty() && !p.contains('-'))
+            .unwrap_or(false);
+	
+	if !needs_enrichment {
+            continue;
+	}
+	
+	// Try to look up the character name (column 8).
+	let char_name = row.get(8).cloned().unwrap_or_default();
+	let key = char_name.trim().to_lowercase();
+	
+	if let Some(full_id) = name_to_char_id.get(&key) {
+            if let Some(player_cell) = row.get_mut(7) {
+		*player_cell = full_id.clone();
+            }
+	}
+    }
+    
+    // ----------------------------------------------------------------
     // Step 5: Write output in the chosen format
     // ----------------------------------------------------------------
     match output_format {
